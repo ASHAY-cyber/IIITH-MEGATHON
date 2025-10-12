@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>Collaborative Text Editor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1e1e1e; color: #d4d4d4; height: 100vh; display: flex; flex-direction: column; }
+        .toolbar { background: #252526; padding: 8px 16px; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid #3e3e42; flex-wrap: wrap; }
+        .btn { background: #0e639c; color: white; border: none; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; }
+        .btn:hover { background: #1177bb; }
+        .btn.secondary { background: #3e3e42; }
+        .btn.secondary:hover { background: #505050; }
+        input[type='text'] { background: #3c3c3c; color: #d4d4d4; border: 1px solid #3e3e42; padding: 6px 12px; border-radius: 4px; font-size: 14px; width: 180px; }
+        .status-bar { background: #007acc; color: white; padding: 4px 16px; font-size: 12px; display: flex; justify-content: space-between; align-items: center; }
+        .editor-container { flex: 1; display: flex; overflow: hidden; position: relative; }
+        .file-list { width: 250px; background: #252526; border-right: 1px solid #3e3e42; overflow-y: auto; }
+        .file-item { padding: 8px 16px; cursor: pointer; border-bottom: 1px solid #3e3e42; display: flex; align-items: center; gap: 8px; font-size: 13px; }
+        .file-item:hover { background: #2a2d2e; }
+        .file-item.active { background: #37373d; border-left: 2px solid #007acc; }
+        .editor-wrapper { flex: 1; position: relative; }
+        textarea { width: 100%; height: 100%; background: #1e1e1e; color: #d4d4d4; border: none; padding: 16px; font-family: 'Consolas', 'Courier New', monospace; font-size: 14px; line-height: 20px; resize: none; outline: none; position: relative; z-index: 1; }
+        .cursors-layer { position: absolute; top: 16px; left: 16px; right: 16px; bottom: 16px; pointer-events: none; z-index: 2; font-family: 'Consolas', 'Courier New', monospace; font-size: 14px; line-height: 20px; overflow: hidden; }
+        .cursor { position: absolute; width: 2px; height: 20px; animation: blink 1s infinite; }
+        .cursor-label { position: absolute; padding: 2px 6px; border-radius: 3px; font-size: 11px; white-space: nowrap; transform: translateY(-100%); margin-top: -4px; font-weight: 600; }
+        @keyframes blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0.4; } }
+        .users-panel { position: absolute; top: 8px; right: 8px; background: #252526; border: 1px solid #3e3e42; border-radius: 4px; padding: 8px 12px; z-index: 3; max-height: 300px; overflow-y: auto; }
+        .users-panel h4 { font-size: 11px; color: #888; margin-bottom: 6px; text-transform: uppercase; }
+        .user-badge { display: flex; align-items: center; gap: 6px; padding: 4px 8px; margin: 2px 0; border-radius: 3px; font-size: 12px; }
+        .user-dot { width: 8px; height: 8px; border-radius: 50%; }
+        .message { padding: 4px 8px; background: #4caf50; color: white; border-radius: 4px; font-size: 12px; }
+        .message.error { background: #f44336; }
+        .connection-status { padding: 3px 10px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+        .connection-status.connected { background: #4caf50; color: white; }
+        .connection-status.disconnected { background: #f44336; color: white; }
+        .connection-status.connecting { background: #ff9800; color: white; }
+    </style>
+</head>
+<body>
+    <div class='toolbar'>
+        <button class='btn' onclick='newFile()'>New</button>
+        <button class='btn secondary' onclick='saveFile()'>Save</button>
+        <button class='btn secondary' onclick='deleteFile()'>Delete</button>
+        <input type='text' id='filename' placeholder='filename.txt'>
+        <input type='text' id='username' placeholder='Your name'>
+        <span id='connection-status' class='connection-status disconnected'>Disconnected</span>
+        <div id='message' style='margin-left: auto;'></div>
+    </div>
+    <div class='editor-container'>
+        <div class='file-list' id='fileList'></div>
+        <div class='editor-wrapper'>
+            <div class='cursors-layer' id='cursorsLayer'></div>
+            <textarea id='editor' placeholder='Start typing... Real-time collaboration enabled!'></textarea>
+            <div class='users-panel' id='usersPanel'><h4>Online Users</h4><div id='usersList'></div></div>
+        </div>
+    </div>
+    <div class='status-bar'>
+        <span id='status'>Ready - Waiting for connection...</span>
+        <span id='stats'>Line 1, Column 1</span>
+    </div>
+    <script>
+        let currentFile = '';
+        let ws = null;
+        let users = {};
+        let myColor = '#FF6B6B';
+        let reconnectAttempts = 0;
+        let isUpdating = false;
+        const editor = document.getElementById('editor');
+        const filenameInput = document.getElementById('filename');
+        const usernameInput = document.getElementById('username');
+        const fileList = document.getElementById('fileList');
+        const status = document.getElementById('status');
+        const stats = document.getElementById('stats');
+        const message = document.getElementById('message');
+        const cursorsLayer = document.getElementById('cursorsLayer');
+        const usersList = document.getElementById('usersList');
+        const connectionStatus = document.getElementById('connection-status');
+        
+        usernameInput.value = 'User' + Math.floor(Math.random() * 10000);
+        
+        function connectWebSocket() {
+            if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+                return;
+            }
+            
+            connectionStatus.textContent = 'Connecting...';
+            connectionStatus.className = 'connection-status connecting';
+            
+            const wsUrl = 'ws://' + window.location.hostname + ':8081';
+            console.log('Connecting to:', wsUrl);
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                connectionStatus.textContent = 'Connected';
+                connectionStatus.className = 'connection-status connected';
+                status.textContent = 'Connected to server';
+                reconnectAttempts = 0;
+                
+                ws.send(JSON.stringify({
+                    type: 'join',
+                    username: usernameInput.value,
+                    file: currentFile
+                }));
+            };
+            
+            ws.onmessage = (e) => {
+                console.log('Received:', e.data);
+                try {
+                    const data = JSON.parse(e.data);
+                    handleMessage(data);
+                } catch (err) {
+                    console.error('Parse error:', err, e.data);
+                }
+            };
+            
+            ws.onerror = (err) => {
+                console.error('WebSocket error:', err);
+                connectionStatus.textContent = 'Error';
+                connectionStatus.className = 'connection-status disconnected';
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                connectionStatus.textContent = 'Disconnected';
+                connectionStatus.className = 'connection-status disconnected';
+                status.textContent = 'Disconnected - Reconnecting...';
+                users = {};
+                updateCursors();
+                
+                reconnectAttempts++;
+                const delay = Math.min(5000, 1000 * reconnectAttempts);
+                setTimeout(connectWebSocket, delay);
+            };
+        }
+        
+        function handleMessage(data) {
+            if (data.type === 'init') {
+                myColor = data.color;
+                console.log('Initialized with color:', myColor);
+            } else if (data.type === 'content_update') {
+                if (data.file === currentFile && data.username !== usernameInput.value) {
+                    isUpdating = true;
+                    const cursorPos = editor.selectionStart;
+                    editor.value = data.content;
+                    editor.setSelectionRange(cursorPos, cursorPos);
+                    isUpdating = false;
+                }
+            } else if (data.type === 'cursor_update') {
+                if (data.file === currentFile && data.username !== usernameInput.value) {
+                    users[data.username] = {pos: data.position, color: data.color};
+                    updateCursors();
+                }
+            } else if (data.type === 'user_joined') {
+                showMessage(data.username + ' joined', false);
+            } else if (data.type === 'user_left') {
+                delete users[data.username];
+                updateCursors();
+                showMessage(data.username + ' left', false);
+            } else if (data.type === 'users_list') {
+                users = {};
+                data.users.forEach(u => {
+                    if (u.username !== usernameInput.value && u.file === currentFile) {
+                        users[u.username] = {pos: u.cursor_pos || 0, color: u.color};
+                    }
+                });
+                updateCursors();
+            }
+        }
+        
+        function updateCursors() {
+            cursorsLayer.innerHTML = '';
+            const text = editor.value;
+            const charWidth = 8.4;
+            const lineHeight = 20;
+            
+            Object.keys(users).forEach(username => {
+                const user = users[username];
+                const pos = user.pos || 0;
+                const beforeCursor = text.substring(0, pos);
+                const lines = beforeCursor.split('\n');
+                const line = lines.length - 1;
+                const col = lines[lines.length - 1].length;
+                
+                const cursor = document.createElement('div');
+                cursor.className = 'cursor';
+                cursor.style.backgroundColor = user.color;
+                cursor.style.top = (line * lineHeight) + 'px';
+                cursor.style.left = (col * charWidth) + 'px';
+                
+                const label = document.createElement('div');
+                label.className = 'cursor-label';
+                label.textContent = username;
+                label.style.backgroundColor = user.color;
+                label.style.color = 'white';
+                label.style.top = (line * lineHeight) + 'px';
+                label.style.left = (col * charWidth) + 'px';
+                
+                cursorsLayer.appendChild(cursor);
+                cursorsLayer.appendChild(label);
+            });
+            
+            usersList.innerHTML = Object.keys(users).map(u => 
+                `<div class='user-badge'><div class='user-dot' style='background: ${users[u].color}'></div>${u}</div>`
+            ).join('') || '<div style="font-size: 11px; color: #888; padding: 4px 0;">No other users</div>';
+        }
+        
+        let inputTimeout;
+        editor.addEventListener('input', () => {
+            if (isUpdating) return;
+            
+            clearTimeout(inputTimeout);
+            inputTimeout = setTimeout(() => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'content_change',
+                        content: editor.value,
+                        file: currentFile,
+                        username: usernameInput.value
+                    }));
+                }
+            }, 100);
+            updateStats();
+        });
+        
+        editor.addEventListener('click', sendCursorPosition);
+        editor.addEventListener('keyup', sendCursorPosition);
+        
+        let cursorTimeout;
+        function sendCursorPosition() {
+            clearTimeout(cursorTimeout);
+            cursorTimeout = setTimeout(() => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'cursor_move',
+                        position: editor.selectionStart,
+                        file: currentFile,
+                        username: usernameInput.value
+                    }));
+                }
+            }, 50);
+        }
+        
+        function updateStats() {
+            const text = editor.value;
+            const pos = editor.selectionStart;
+            const lines = text.substr(0, pos).split('\n');
+            stats.textContent = `Line ${lines.length}, Column ${lines[lines.length-1].length + 1} | ${Object.keys(users).length} users online`;
+        }
+        
+        async function loadFiles() {
+            try {
+                const res = await fetch('/api/files');
+                const files = await res.json();
+                fileList.innerHTML = files.map(f => 
+                    `<div class='file-item ${f === currentFile ? 'active' : ''}' onclick='openFile("${f}")'>
+                        <svg style='width:14px;height:14px' viewBox='0 0 16 16' fill='currentColor'><path d='M9 1H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V6l-5-5z'/></svg>
+                        ${f}
+                    </div>`
+                ).join('') || '<div style="padding: 16px; color: #888; font-size: 12px;">No files yet</div>';
+            } catch (err) {
+                console.error('Failed to load files:', err);
+            }
+        }
+        
+        async function openFile(filename) {
+            try {
+                const res = await fetch('/api/file?name=' + encodeURIComponent(filename));
+                const data = await res.json();
+                editor.value = data.content;
+                currentFile = filename;
+                filenameInput.value = filename;
+                status.textContent = 'Opened: ' + filename;
+                loadFiles();
+                
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({type: 'file_change', file: filename, username: usernameInput.value}));
+                }
+            } catch (err) {
+                showMessage('Failed to open file', true);
+            }
+        }
+        
+        async function saveFile() {
+            const filename = filenameInput.value.trim();
+            if (!filename) { showMessage('Enter a filename', true); return; }
+            
+            try {
+                await fetch('/api/file', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({filename, content: editor.value})
+                });
+                currentFile = filename;
+                status.textContent = 'Saved: ' + filename;
+                showMessage('File saved successfully');
+                loadFiles();
+            } catch (err) {
+                showMessage('Failed to save file', true);
+            }
+        }
+        
+        async function deleteFile() {
+            const filename = filenameInput.value.trim();
+            if (!filename) { showMessage('Select a file to delete', true); return; }
+            if (!confirm('Delete ' + filename + '?')) return;
+            
+            try {
+                await fetch('/api/file?name=' + encodeURIComponent(filename), {method: 'DELETE'});
+                editor.value = '';
+                filenameInput.value = '';
+                currentFile = '';
+                status.textContent = 'Deleted: ' + filename;
+                showMessage('File deleted');
+                loadFiles();
+            } catch (err) {
+                showMessage('Failed to delete file', true);
+            }
+        }
+        
+        function newFile() {
+            editor.value = '';
+            filenameInput.value = '';
+            currentFile = '';
+            status.textContent = 'New file';
+            loadFiles();
+        }
+        
+        function showMessage(text, isError = false) {
+            message.textContent = text;
+            message.className = 'message' + (isError ? ' error' : '');
+            setTimeout(() => message.textContent = '', 3000);
+        }
+        
+        document.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 's') {
+                e.preventDefault();
+                saveFile();
+            }
+        });
+        
+        usernameInput.addEventListener('change', () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({type: 'username_change', username: usernameInput.value}));
+            }
+        });
+        
+        connectWebSocket();
+        loadFiles();
+        setInterval(updateStats, 1000);
+    </script>
+</body>
+</html>
