@@ -190,7 +190,8 @@ chmod 755 ./files/
 
 ## DRIVE LINK FOR VIDEO 
 https://drive.google.com/file/d/1tRapSh2oT6Zkw1CfBu-s3q8-rvcmwQYi/view?usp=drivesdk
-
+## DRIVE LINK FOR PRESENTATION PDF
+https://drive.google.com/file/d/1X2c46D1NQSYxMGJBBNhbOdg6zmb0vZUs/view?usp=sharing
 ## License
 
 This project is open source and available under the MIT License.
